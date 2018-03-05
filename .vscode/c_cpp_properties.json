@@ -1,0 +1,18 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "",
+        "limitSymbolsToIncludedHeaders": true
+      },
+      "includePath": [
+        "/home/kaigi/carto_ws/install_isolated/include",
+        "/home/kaigi/catkin_ws/devel/include",
+        "/opt/ros/kinetic/include",
+        "/home/kaigi/catkin_ws/src/keigan_motor_driver/include",
+        "/usr/include"
+      ],
+      "name": "Linux"
+    }
+  ]
+}
