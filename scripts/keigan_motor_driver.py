@@ -1,136 +1,62 @@
+#!/usr/bin/env python
+from math import pi, sin, cos
 
+import KMControllers
+from pose import Pose
+
+import rospy
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import (
+    Twist,
+    TransformStamped,
+    Quaternion
+)
+import tf
 
 class KeiganMotorDriver():
     """
-    The Cozmo ROS driver object.
+    The Keigan Motor driver object.
 
     """
     
     def __init__(self):
         """
-
-        :type   coz:    cozmo.Robot
-        :param  coz:    The cozmo SDK robot handle (object).
         
         """
 
-        # vars
-        self._lin_vel = .0
-        self._ang_vel = .0
-        self._cmd_lin_vel = .0
-        self._cmd_ang_vel = .0
-        self._last_pose = self._cozmo.pose
-        self._wheel_vel = (0, 0)
-        self._optical_frame_orientation = quaternion_from_euler(-np.pi/2., .0, -np.pi/2.)
-        self._camera_info_manager = CameraInfoManager('cozmo_camera', namespace='/cozmo_camera')
-
-        # tf
-        self._tfb = TransformBroadcaster()
-
-        # params
+        ## params
         self._odom_frame = rospy.get_param('~odom_frame', 'odom')
-        self._footprint_frame = rospy.get_param('~footprint_frame', 'base_footprint')
         self._base_frame = rospy.get_param('~base_frame', 'base_link')
-        self._head_frame = rospy.get_param('~head_frame', 'head_link')
-        self._camera_frame = rospy.get_param('~camera_frame', 'camera_link')
-        self._camera_optical_frame = rospy.get_param('~camera_optical_frame', 'cozmo_camera')
-        camera_info_url = rospy.get_param('~camera_info_url', '')
+        # 2 wheel dolly's wheel separation is ~30.5 cm
+        self._wheel_separation = float(rospy.get_param('~wheel_separation', 0.305))
+        # 2 wheel dolly's wheel diameter is ~12 cm
+        self._wheel_diameter = float(rospy.get_param('~wheel_diameter', 0.12))
+        # wheel directions
+        self._left_wheel_forward = rospy.get_param('~left_wheel_forward', True)
+        self._right_wheel_forward = rospy.get_param('~left_wheel_forward', False)
+        # keigan motors BLE mac addresses
+        self._left_wheel_mac = rospy.get_param('~left_wheel_mac', 'D8:BA:37:4A:88:A1')
+        self._right_wheel_mac = rospy.get_param('~right_wheel_mac', 'DD:7A:96:3C:E1:51')
 
-        # pubs
-        self._joint_state_pub = rospy.Publisher('joint_states', JointState, queue_size=1)
+        ## vars
+        self._pose = Pose()
+        self._left_last_pos = 0.0
+        self._right_last_pos = 0.0
+        self._last_time = rospy.Time.now()
+        # max rotation is 250 rpm, or ~26 rad/s
+        self._max_rot = 26.0 #rad/s
+        # wheels BLE device handle
+        self._left_wheel_dev = KMControllers.BLEController(self._left_wheel_mac)
+        self._right_wheel_dev = KMControllers.BLEController(self._right_wheel_mac)
+
+        ## tf
+        self._tfb = tf.TransformBroadcaster()
+
+        ## pubs
         self._odom_pub = rospy.Publisher('odom', Odometry, queue_size=1)
-        self._imu_pub = rospy.Publisher('imu', Imu, queue_size=1)
-        self._battery_pub = rospy.Publisher('battery', BatteryState, queue_size=1)
-        # Note: camera is published under global topic (preceding "/")
-        self._image_pub = rospy.Publisher('/cozmo_camera/image', Image, queue_size=10)
-        self._camera_info_pub = rospy.Publisher('/cozmo_camera/camera_info', CameraInfo, queue_size=10)
 
-        # subs
-        self._backpack_led_sub = rospy.Subscriber(
-            'backpack_led', ColorRGBA, self._set_backpack_led, queue_size=1)
+        ## subs
         self._twist_sub = rospy.Subscriber('cmd_vel', Twist, self._twist_callback, queue_size=1)
-        self._say_sub = rospy.Subscriber('say', String, self._say_callback, queue_size=1)
-        self._head_sub = rospy.Subscriber('head_angle', Float64, self._move_head, queue_size=10)
-        self._lift_sub = rospy.Subscriber('lift_height', Float64, self._move_lift, queue_size=10)
-
-        # diagnostics
-        self._diag_array = DiagnosticArray()
-        self._diag_array.header.frame_id = self._base_frame
-        diag_status = DiagnosticStatus()
-        diag_status.hardware_id = 'Cozmo Robot'
-        diag_status.name = 'Cozmo Status'
-        diag_status.values.append(KeyValue(key='Battery Voltage', value=''))
-        diag_status.values.append(KeyValue(key='Head Angle', value=''))
-        diag_status.values.append(KeyValue(key='Lift Height', value=''))
-        self._diag_array.status.append(diag_status)
-        self._diag_pub = rospy.Publisher('/diagnostics', DiagnosticArray, queue_size=1)
-
-        # camera info manager
-        self._camera_info_manager.setURL(camera_info_url)
-        self._camera_info_manager.loadCameraInfo()
-
-    def _publish_diagnostics(self):
-        # alias
-        diag_status = self._diag_array.status[0]
-
-        # fill diagnostics array
-        battery_voltage = self._cozmo.battery_voltage
-        diag_status.values[0].value = '{:.2f} V'.format(battery_voltage)
-        diag_status.values[1].value = '{:.2f} deg'.format(self._cozmo.head_angle.degrees)
-        diag_status.values[2].value = '{:.2f} mm'.format(self._cozmo.lift_height.distance_mm)
-        if battery_voltage > 3.5:
-            diag_status.level = DiagnosticStatus.OK
-            diag_status.message = 'Everything OK!'
-        elif battery_voltage > 3.4:
-            diag_status.level = DiagnosticStatus.WARN
-            diag_status.message = 'Battery low! Go charge soon!'
-        else:
-            diag_status.level = DiagnosticStatus.ERROR
-            diag_status.message = 'Battery very low! Cozmo will power off soon!'
-
-        # update message stamp and publish
-        self._diag_array.header.stamp = rospy.Time.now()
-        self._diag_pub.publish(self._diag_array)
-
-    def _move_head(self, cmd):
-        """
-        Move head to given angle.
-        
-        :type   cmd:    Float64
-        :param  cmd:    The message containing angle in degrees. [-25 - 44.5]
-        
-        """
-        action = self._cozmo.set_head_angle(radians(cmd.data * np.pi / 180.), duration=0.1,
-                                            in_parallel=True)
-        action.wait_for_completed()
-
-    def _move_lift(self, cmd):
-        """
-        Move lift to given height.
-
-        :type   cmd:    Float64
-        :param  cmd:    A value between [0 - 1], the SDK auto
-                        scales it to the according height.
-
-        """
-        action = self._cozmo.set_lift_height(height=cmd.data,
-                                             duration=0.2, in_parallel=True)
-        action.wait_for_completed()
-
-    def _set_backpack_led(self, msg):
-        """
-        Set the color of the backpack LEDs.
-
-        :type   msg:    ColorRGBA
-        :param  msg:    The color to be set.
-
-        """
-        # setup color as integer values
-        color = [int(x * 255) for x in [msg.r, msg.g, msg.b, msg.a]]
-        # create lights object with duration
-        light = cozmo.lights.Light(cozmo.lights.Color(rgba=color), on_period_ms=1000)
-        # set lights
-        self._cozmo.set_all_backpack_lights(light)
 
     def _twist_callback(self, cmd):
         """
@@ -143,132 +69,71 @@ class KeiganMotorDriver():
         :param  cmd:    The commanded velocities.
 
         """
-        # compute differential wheel speed
-        axle_length = 0.07  # 7cm
-        self._cmd_lin_vel = cmd.linear.x
-        self._cmd_ang_vel = cmd.angular.z
-        rv = self._cmd_lin_vel + (self._cmd_ang_vel * axle_length * 0.5)
-        lv = self._cmd_lin_vel - (self._cmd_ang_vel * axle_length * 0.5)
-        self._wheel_vel = (lv*1000., rv*1000.)  # convert to mm / s
-
-    def _say_callback(self, msg):
-        """
-        The callback for incoming text messages to be said.
-
-        :type   msg:    String
-        :param  msg:    The text message to say.
-
-        """
-        self._cozmo.say_text(msg.data)#.wait_for_completed()
-
-    def _publish_objects(self):
-        """
-        Publish detected object as transforms between odom_frame and object_frame.
-
-        """
-
-        for obj in self._cozmo.world.connected_light_cubes:
-            if obj.is_visible:
-                now = rospy.Time.now()
-                x = obj.pose.position.x * 0.001
-                y = obj.pose.position.y * 0.001
-                z = obj.pose.position.z * 0.001
-                q = (obj.pose.rotation.q1, obj.pose.rotation.q2, obj.pose.rotation.q3, obj.pose.rotation.q0)
-                self._tfb.send_transform(
-                    (x, y, z), q, now, 'cube_' + str(obj.cube_id), self._odom_frame
-                )
-
-    def _publish_image(self):
-        """
-        Publish latest camera image as Image with CameraInfo.
-
-        """
-        # only publish if we have a subscriber
-        if self._image_pub.get_num_connections() == 0:
-            return
-
-        # get latest image from cozmo's camera
-        camera_image = self._cozmo.world.latest_image
-        if camera_image is not None:
-            # convert image to gray scale as it is gray although
-            #img = camera_image.raw_image.convert('L')
-            img = camera_image.raw_image
-            ros_img = Image()
-            ros_img.encoding = 'rgb8'
-            ros_img.width = img.size[0]
-            ros_img.height = img.size[1]
-            ros_img.step = ros_img.width * 3
-            ros_img.data = img.tobytes()
-            ros_img.header.frame_id = 'cozmo_camera'
-            cozmo_time = camera_image.image_recv_time
-            ros_img.header.stamp = rospy.Time.from_sec(cozmo_time)
-            # publish images and camera info
-            self._image_pub.publish(ros_img)
-            camera_info = self._camera_info_manager.getCameraInfo()
-            camera_info.header = ros_img.header
-            self._camera_info_pub.publish(camera_info)
-
-    def _publish_joint_state(self):
-        """
-        Publish joint states as JointStates.
-
-        """
-        # only publish if we have a subscriber
-        if self._joint_state_pub.get_num_connections() == 0:
-            return
-
-        js = JointState()
-        js.header.stamp = rospy.Time.now()
-        js.header.frame_id = 'cozmo'
-        js.name = ['head', 'lift']
-        js.position = [self._cozmo.head_angle.radians,
-                       self._cozmo.lift_height.distance_mm * 0.001]
-        js.velocity = [0.0, 0.0]
-        js.effort = [0.0, 0.0]
-        self._joint_state_pub.publish(js)
-
-    def _publish_imu(self):
-        """
-        Publish inertia data as Imu message.
-
-        """
-        # only publish if we have a subscriber
-        if self._imu_pub.get_num_connections() == 0:
-            return
-
-        imu = Imu()
-        imu.header.stamp = rospy.Time.now()
-        imu.header.frame_id = self._base_frame
-        imu.orientation.w = self._cozmo.pose.rotation.q0
-        imu.orientation.x = self._cozmo.pose.rotation.q1
-        imu.orientation.y = self._cozmo.pose.rotation.q2
-        imu.orientation.z = self._cozmo.pose.rotation.q3
-        imu.angular_velocity.x = self._cozmo.gyro.x
-        imu.angular_velocity.y = self._cozmo.gyro.y
-        imu.angular_velocity.z = self._cozmo.gyro.z
-        imu.linear_acceleration.x = self._cozmo.accelerometer.x * 0.001
-        imu.linear_acceleration.y = self._cozmo.accelerometer.y * 0.001
-        imu.linear_acceleration.z = self._cozmo.accelerometer.z * 0.001
-        self._imu_pub.publish(imu)
-
-    def _publish_battery(self):
-        """
-        Publish battery as BatteryState message.
-
-        """
-        # only publish if we have a subscriber
-        if self._battery_pub.get_num_connections() == 0:
-            return
-
-        battery = BatteryState()
-        battery.header.stamp = rospy.Time.now()
-        battery.voltage = self._cozmo.battery_voltage
-        battery.present = True
-        if self._cozmo.is_on_charger:  # is_charging always return False
-            battery.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
+        # compute differential wheel velocities
+        self._left_wheel_vel = cmd.linear.x - (cmd.angular.z * self._wheel_separation * 0.5)
+        self._right_wheel_vel = cmd.linear.x + (cmd.angular.z * self._wheel_separation * 0.5)
+        # calculate wheel rate in rad/s
+        left_rate = (self._left_wheel_vel / (self._wheel_diameter * 0.5)) * (1.0 if self._left_wheel_forward else -1.0)
+        right_rate = (self._right_wheel_vel / (self._wheel_diameter * 0.5)) * (1.0 if self._right_wheel_forward else -1.0)
+        # set the wheel speeds
+        self._left_wheel_dev.speed(abs(left_rate))
+        self._right_wheel_dev.speed(abs(right_rate))
+        # rotate the motor according to the wheel rates sign
+        if left_rate >= 0 :
+            self._left_wheel_dev.runForward()
         else:
-            battery.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_NOT_CHARGING
-        self._battery_pub.publish(battery)
+            self._left_wheel_dev.runReverse()
+        if right_rate >= 0 :
+            self._right_wheel_dev.runForward()
+        else:
+            self._right_wheel_dev.runReverse()
+    
+    def _update_pose(self):
+        # get wheels' position measurements
+        left_pos, _, _ = self._left_wheel_dev.read_motor_measurement()
+        right_pos, _, _ = self._right_wheel_dev.read_motor_measurement()
+        left_pos *= 1.0 if self._left_wheel_forward else -1.0
+        right_pos *= 1.0 if self._right_wheel_forward else -1.0
+        now = rospy.Time.now()
+
+        # calculate pose from wheels' position measurements
+        left_travel = (left_pos - self._left_last_pos) * self._wheel_diameter * 0.5
+        right_travel = (right_pos - self._right_last_pos) * self._wheel_diameter * 0.5
+        delta_time = (now - self._last_time).to_sec()
+
+        delta_travel = (right_travel + left_travel) / 2
+        delta_theta = (right_travel - left_travel) / self._wheel_separation
+
+        if right_travel == left_travel:
+            deltaX = left_travel*cos(self._pose.theta)
+            deltaY = left_travel*sin(self._pose.theta)
+        else:
+            radius = self._wheel_separation/2 \
+                * (right_travel + left_travel) / (right_travel - left_travel)
+
+            # Find the instantaneous center of curvature (ICC).
+            iccX = self._pose.x - radius*sin(self._pose.theta)
+            iccY = self._pose.y + radius*cos(self._pose.theta)
+
+            deltaX = cos(delta_theta)*(self._pose.x - iccX) \
+                - sin(delta_theta)*(self._pose.y - iccY) \
+                + iccX - self._pose.x
+          
+            deltaY = sin(delta_theta)*(self._pose.x - iccX) \
+                + cos(delta_theta)*(self._pose.y - iccY) \
+                + iccY - self._pose.y
+        
+        # update pose
+        self._pose.x += deltaX
+        self._pose.y += deltaY
+        self._pose.theta = (self._pose.theta + delta_theta) % (2*pi)
+        self._pose.xVel = delta_travel / delta_time
+        self._pose.yVel = 0
+        self._pose.thetaVel = delta_theta / delta_time
+
+        self._last_time = now
+        self._left_last_pos = left_pos
+        self._right_last_pos = right_pos
 
     def _publish_odometry(self):
         """
@@ -279,80 +144,36 @@ class KeiganMotorDriver():
         if self._odom_pub.get_num_connections() == 0:
             return
 
+        # update robot pose from wheel measurements
+        self._update_pose()
+
         now = rospy.Time.now()
+
+        # publish odometry
         odom = Odometry()
-        odom.header.frame_id = self._odom_frame
         odom.header.stamp = now
-        odom.child_frame_id = self._footprint_frame
-        odom.pose.pose.position.x = self._cozmo.pose.position.x * 0.001
-        odom.pose.pose.position.y = self._cozmo.pose.position.y * 0.001
-        odom.pose.pose.position.z = self._cozmo.pose.position.z * 0.001
-        q = quaternion_from_euler(.0, .0, self._cozmo.pose_angle.radians)
-        odom.pose.pose.orientation.x = q[0]
-        odom.pose.pose.orientation.y = q[1]
-        odom.pose.pose.orientation.z = q[2]
-        odom.pose.pose.orientation.w = q[3]
-        odom.pose.covariance = np.diag([1e-2, 1e-2, 1e-2, 1e3, 1e3, 1e-1]).ravel()
-        odom.twist.twist.linear.x = self._lin_vel
-        odom.twist.twist.angular.z = self._ang_vel
-        odom.twist.covariance = np.diag([1e-2, 1e3, 1e3, 1e3, 1e3, 1e-2]).ravel()
+        odom.header.frame_id = self._odom_frame
+        odom.child_frame_id = self._base_frame
+        odom.pose.pose.position.x = self._pose.x
+        odom.pose.pose.position.y = self._pose.y
+        q = Quaternion()
+        q.x = 0
+        q.y = 0
+        q.z = sin(self._pose.theta / 2)
+        q.w = cos(self._pose.theta / 2)
+        odom.pose.pose.orientation = q
+        odom.twist.twist.linear.x = self._pose.xVel
+        odom.twist.twist.angular.z = self._pose.thetaVel
         self._odom_pub.publish(odom)
 
-    def _publish_tf(self, update_rate):
-        """
-        Broadcast current transformations and update
-        measured velocities for odometry twist.
-
-        Published transforms:
-
-        odom_frame -> footprint_frame
-        footprint_frame -> base_frame
-        base_frame -> head_frame
-        head_frame -> camera_frame
-        camera_frame -> camera_optical_frame
-
-        """
-        now = rospy.Time.now()
-        x = self._cozmo.pose.position.x * 0.001
-        y = self._cozmo.pose.position.y * 0.001
-        z = self._cozmo.pose.position.z * 0.001
-
-        # compute current linear and angular velocity from pose change
-        # Note: Sign for linear velocity is taken from commanded velocities!
-        # Note: The angular velocity can also be taken from gyroscopes!
-        delta_pose = self._last_pose - self._cozmo.pose
-        dist = np.sqrt(delta_pose.position.x**2
-                       + delta_pose.position.y**2
-                       + delta_pose.position.z**2) / 1000.0
-        self._lin_vel = dist * update_rate * np.sign(self._cmd_lin_vel)
-        self._ang_vel = -delta_pose.rotation.angle_z.radians * update_rate
-
-        # publish odom_frame -> footprint_frame
-        q = quaternion_from_euler(.0, .0, self._cozmo.pose_angle.radians)
-        self._tfb.send_transform(
-            (x, y, 0.0), q, now, self._footprint_frame, self._odom_frame)
-
-        # publish footprint_frame -> base_frame
-        q = quaternion_from_euler(.0, -self._cozmo.pose_pitch.radians, .0)
-        self._tfb.send_transform(
-            (0.0, 0.0, 0.02), q, now, self._base_frame, self._footprint_frame)
-
-        # publish base_frame -> head_frame
-        q = quaternion_from_euler(.0, -self._cozmo.head_angle.radians, .0)
-        self._tfb.send_transform(
-            (0.02, 0.0, 0.05), q, now, self._head_frame, self._base_frame)
-
-        # publish head_frame -> camera_frame
-        self._tfb.send_transform(
-            (0.025, 0.0, -0.015), (0.0, 0.0, 0.0, 1.0), now, self._camera_frame, self._head_frame)
-
-        # publish camera_frame -> camera_optical_frame
-        q = self._optical_frame_orientation
-        self._tfb.send_transform(
-            (0.0, 0.0, 0.0), q, now, self._camera_optical_frame, self._camera_frame)
-
-        # store last pose
-        self._last_pose = deepcopy(self._cozmo.pose)
+        # publish tf
+        self._tfb.sendTransform(
+            (self._pose.x, self._pose.y, 0),
+            (q.x, q.y, q.z, q.w),
+            now,
+            self._base_frame,
+            self._odom_frame
+        )
 
     def run(self, update_rate=10):
         """
@@ -362,30 +183,32 @@ class KeiganMotorDriver():
         :param  update_rate:    The update rate.
 
         """
+        # reset the measurements position to origin
+        self._left_wheel_dev.presetPosition(0.0)
+        self._right_wheel_dev.presetPosition(0.0)
+        # enable motors
+        self._left_wheel_dev.enable()
+        self._right_wheel_dev.enable()
+        # disable IMU to save battery
+        self._left_wheel_dev.disableIMU()
+        self._right_wheel_dev.disableIMU()
+        # main loop
         r = rospy.Rate(update_rate)
         while not rospy.is_shutdown():
-            self._publish_tf(update_rate)
-            self._publish_image()
-            self._publish_objects()
-            self._publish_joint_state()
-            self._publish_imu()
-            self._publish_battery()
             self._publish_odometry()
-            self._publish_diagnostics()
-            # send message repeatedly to avoid idle mode.
-            # This might cause low battery soon
-            # TODO improve this!
-            self._cozmo.drive_wheels(*self._wheel_vel)
             # sleep
             r.sleep()
-        # stop events on cozmo
-        self._cozmo.stop_all_motors()
+    
+    def on_shutdown(self):
+        # disconnect all keigan motors
+        self._left_wheel_dev.disconnect()
+        self._right_wheel_dev.disconnect()
 
 if __name__ == '__main__':
-    rospy.init_node('map_coverage')
-    map_coverage = MapCoverage()
-    rospy.on_shutdown(map_coverage.on_shutdown)
+    rospy.init_node('keigan_motor_driver')
+    keigan_motor_driver = KeiganMotorDriver()
+    rospy.on_shutdown(keigan_motor_driver.on_shutdown)
     try:
-        map_coverage.run()
+        keigan_motor_driver.run()
     except rospy.ROSInterruptException:
         rospy.loginfo("Exception thrown")
