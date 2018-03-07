@@ -25,8 +25,9 @@ class KeiganMotorDriver():
         """
 
         ## params
+        # tf frames
         self._odom_frame = rospy.get_param('~odom_frame', 'odom')
-        self._base_frame = rospy.get_param('~base_frame', 'base_link')
+        self._base_frame = rospy.get_param('~base_frame', 'base_footprint')
         # 2 wheel dolly's wheel separation is ~30.5 cm
         self._wheel_separation = float(rospy.get_param('~wheel_separation', 0.305))
         # 2 wheel dolly's wheel diameter is ~12 cm
@@ -37,6 +38,8 @@ class KeiganMotorDriver():
         # keigan motors BLE mac addresses
         self._left_wheel_mac = rospy.get_param('~left_wheel_mac', 'D8:BA:37:4A:88:A1')
         self._right_wheel_mac = rospy.get_param('~right_wheel_mac', 'DD:7A:96:3C:E1:51')
+        # update rate, default 30 Hz
+        self._update_rate = rospy.get_param('~update_rate', 30.0)
 
         ## vars
         self._pose = Pose()
@@ -175,7 +178,7 @@ class KeiganMotorDriver():
             self._odom_frame
         )
 
-    def run(self, update_rate=10):
+    def run(self):
         """
         Publish data continuously with given rate.
 
@@ -193,7 +196,7 @@ class KeiganMotorDriver():
         self._left_wheel_dev.disableIMU()
         self._right_wheel_dev.disableIMU()
         # main loop
-        r = rospy.Rate(update_rate)
+        r = rospy.Rate(self._update_rate)
         while not rospy.is_shutdown():
             self._publish_odometry()
             # sleep
