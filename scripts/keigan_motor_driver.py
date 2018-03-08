@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 from math import pi, sin, cos
+import threading
 
+from bluepy.btle import BTLEException
 import KMControllers
 from pose import Pose
 
@@ -34,12 +36,14 @@ class KeiganMotorDriver():
         self._wheel_diameter = float(rospy.get_param('~wheel_diameter', 0.12))
         # wheel directions
         self._left_wheel_forward = rospy.get_param('~left_wheel_forward', True)
-        self._right_wheel_forward = rospy.get_param('~left_wheel_forward', False)
+        self._right_wheel_forward = rospy.get_param('~right_wheel_forward', False)
         # keigan motors BLE mac addresses
         self._left_wheel_mac = rospy.get_param('~left_wheel_mac', 'D8:BA:37:4A:88:A1')
         self._right_wheel_mac = rospy.get_param('~right_wheel_mac', 'DD:7A:96:3C:E1:51')
         # update rate, default 30 Hz
         self._update_rate = rospy.get_param('~update_rate', 30.0)
+        # lock for synchronizing between read and write to BLE
+        self._lock = threading.Lock()
 
         ## vars
         self._pose = Pose()
@@ -72,12 +76,17 @@ class KeiganMotorDriver():
         :param  cmd:    The commanded velocities.
 
         """
+
         # compute differential wheel velocities
         self._left_wheel_vel = cmd.linear.x - (cmd.angular.z * self._wheel_separation * 0.5)
         self._right_wheel_vel = cmd.linear.x + (cmd.angular.z * self._wheel_separation * 0.5)
         # calculate wheel rate in rad/s
         left_rate = (self._left_wheel_vel / (self._wheel_diameter * 0.5)) * (1.0 if self._left_wheel_forward else -1.0)
         right_rate = (self._right_wheel_vel / (self._wheel_diameter * 0.5)) * (1.0 if self._right_wheel_forward else -1.0)
+        
+        # acquire lock to both wheels
+        self._lock.acquire()
+
         # set the wheel speeds
         self._left_wheel_dev.speed(abs(left_rate))
         self._right_wheel_dev.speed(abs(right_rate))
@@ -90,14 +99,23 @@ class KeiganMotorDriver():
             self._right_wheel_dev.runForward()
         else:
             self._right_wheel_dev.runReverse()
+        
+        # release lock to both wheels
+        self._lock.release()
     
     def _update_pose(self):
+        # acquire lock to both wheels
+        self._lock.acquire()
+
         # get wheels' position measurements
         left_pos, _, _ = self._left_wheel_dev.read_motor_measurement()
         right_pos, _, _ = self._right_wheel_dev.read_motor_measurement()
         left_pos *= 1.0 if self._left_wheel_forward else -1.0
         right_pos *= 1.0 if self._right_wheel_forward else -1.0
         now = rospy.Time.now()
+        
+        # release lock to both wheels
+        self._lock.release()
 
         # calculate pose from wheels' position measurements
         left_travel = (left_pos - self._left_last_pos) * self._wheel_diameter * 0.5
@@ -121,7 +139,7 @@ class KeiganMotorDriver():
             deltaX = cos(delta_theta)*(self._pose.x - iccX) \
                 - sin(delta_theta)*(self._pose.y - iccY) \
                 + iccX - self._pose.x
-          
+        
             deltaY = sin(delta_theta)*(self._pose.x - iccX) \
                 + cos(delta_theta)*(self._pose.y - iccY) \
                 + iccY - self._pose.y
@@ -138,6 +156,25 @@ class KeiganMotorDriver():
         self._left_last_pos = left_pos
         self._right_last_pos = right_pos
 
+    def _publish_tf(self):
+        """
+        Publish all tf frames.
+
+        """
+        # update robot pose from wheel measurements
+        self._update_pose()
+
+        now = rospy.Time.now()
+
+        # publish odom tf
+        self._tfb.sendTransform(
+            (self._pose.x, self._pose.y, 0),
+            (0, 0, sin(self._pose.theta / 2), cos(self._pose.theta / 2)),
+            now,
+            self._base_frame,
+            self._odom_frame
+        )
+
     def _publish_odometry(self):
         """
         Publish current pose as Odometry message.
@@ -146,9 +183,6 @@ class KeiganMotorDriver():
         # only publish if we have a subscriber
         if self._odom_pub.get_num_connections() == 0:
             return
-
-        # update robot pose from wheel measurements
-        self._update_pose()
 
         now = rospy.Time.now()
 
@@ -169,15 +203,6 @@ class KeiganMotorDriver():
         odom.twist.twist.angular.z = self._pose.thetaVel
         self._odom_pub.publish(odom)
 
-        # publish tf
-        self._tfb.sendTransform(
-            (self._pose.x, self._pose.y, 0),
-            (q.x, q.y, q.z, q.w),
-            now,
-            self._base_frame,
-            self._odom_frame
-        )
-
     def run(self):
         """
         Publish data continuously with given rate.
@@ -186,6 +211,9 @@ class KeiganMotorDriver():
         :param  update_rate:    The update rate.
 
         """
+        # set the curve type to none
+        self._left_wheel_dev.curveType(0)
+        self._right_wheel_dev.curveType(0)
         # reset the measurements position to origin
         self._left_wheel_dev.presetPosition(0.0)
         self._right_wheel_dev.presetPosition(0.0)
@@ -198,6 +226,7 @@ class KeiganMotorDriver():
         # main loop
         r = rospy.Rate(self._update_rate)
         while not rospy.is_shutdown():
+            self._publish_tf()
             self._publish_odometry()
             # sleep
             r.sleep()
